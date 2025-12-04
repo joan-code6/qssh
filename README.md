@@ -78,12 +78,19 @@ qssh add myserver
 # Username: deploy
 # Port [22]: 22
 # Auth type (password/key) [password]: key
-# Key file path: ~/.ssh/id_rsa
+# Key file path [~/.ssh/id_rsa]: ~/.ssh/my_key
+# Key passphrase (leave empty if none): ********
 ```
+
+Supported key types:
+- RSA
+- Ed25519
+- ECDSA
+- DSS
 
 ## Configuration
 
-Sessions are stored in `~/.qssh/sessions.yaml`. Passwords are stored encoded (not plaintext) but for maximum security, consider using SSH keys instead.
+Sessions are stored in `~/.qssh/sessions.yaml`. Passwords and key passphrases are stored encoded (not plaintext) but for maximum security, consider using SSH keys without passphrases or with an SSH agent.
 
 ## License
 

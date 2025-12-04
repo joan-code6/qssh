@@ -126,6 +126,7 @@ def add_session(name: str):
     
     password = None
     key_file = None
+    key_passphrase = None
     
     if auth_type == "password":
         password_raw = Prompt.ask("[bold]Password[/]", password=True)
@@ -136,6 +137,10 @@ def add_session(name: str):
             "[bold]Key file path[/]",
             default="~/.ssh/id_rsa"
         )
+        # Ask for passphrase (optional)
+        passphrase_raw = Prompt.ask("[bold]Key passphrase[/] (leave empty if none)", password=True, default="")
+        if passphrase_raw:
+            key_passphrase = Session.encode_password(passphrase_raw)
     
     # Create and save session
     session = Session(
@@ -146,6 +151,7 @@ def add_session(name: str):
         auth_type=auth_type,
         password=password,
         key_file=key_file,
+        key_passphrase=key_passphrase,
     )
     
     manager.add(session)
@@ -229,6 +235,7 @@ def edit_session(name: str):
     
     password = session.password
     key_file = session.key_file
+    key_passphrase = getattr(session, 'key_passphrase', None)
     
     if auth_type == "password":
         if Confirm.ask("Update password?", default=False):
@@ -236,11 +243,18 @@ def edit_session(name: str):
             if password_raw:
                 password = Session.encode_password(password_raw)
         key_file = None
+        key_passphrase = None
     else:
         key_file = Prompt.ask(
             "[bold]Key file path[/]",
             default=session.key_file or "~/.ssh/id_rsa"
         )
+        if Confirm.ask("Update key passphrase?", default=False):
+            passphrase_raw = Prompt.ask("[bold]Key passphrase[/] (leave empty if none)", password=True, default="")
+            if passphrase_raw:
+                key_passphrase = Session.encode_password(passphrase_raw)
+            else:
+                key_passphrase = None
         password = None
     
     # Update session
@@ -252,6 +266,7 @@ def edit_session(name: str):
         auth_type=auth_type,
         password=password,
         key_file=key_file,
+        key_passphrase=key_passphrase,
     )
     
     manager.add(updated)

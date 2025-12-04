@@ -29,12 +29,12 @@ class SSHConnector:
             Exit code from SSH process
         """
         if session.auth_type == "key":
-            return self._connect_with_key(session)
+            return self._connect_with_key_paramiko(session)
         else:
             return self._connect_with_paramiko(session)
     
-    def _connect_with_key(self, session: Session) -> int:
-        """Connect using SSH key authentication.
+    def _connect_with_key_paramiko(self, session: Session) -> int:
+        """Connect using SSH key authentication via paramiko.
         
         Args:
             session: Session configuration
@@ -43,19 +43,56 @@ class SSHConnector:
             Exit code
         """
         key_path = os.path.expanduser(session.key_file) if session.key_file else None
+        passphrase = session.get_key_passphrase() if hasattr(session, 'get_key_passphrase') else None
         
-        cmd = [
-            "ssh",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-p", str(session.port),
-        ]
-        
-        if key_path:
-            cmd.extend(["-i", key_path])
-        
-        cmd.append(f"{session.username}@{session.host}")
-        
-        return self._run_ssh(cmd)
+        try:
+            # Create SSH client
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Load the private key
+            pkey = None
+            if key_path and os.path.exists(key_path):
+                try:
+                    # Try different key types
+                    for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey]:
+                        try:
+                            pkey = key_class.from_private_key_file(key_path, password=passphrase)
+                            break
+                        except paramiko.SSHException:
+                            continue
+                except Exception as e:
+                    print(f"[qssh] Error loading key: {e}")
+                    return 1
+            
+            # Connect with key
+            client.connect(
+                hostname=session.host,
+                port=session.port,
+                username=session.username,
+                pkey=pkey,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            
+            # Start interactive shell
+            self._interactive_shell(client)
+            
+            client.close()
+            return 0
+            
+        except paramiko.AuthenticationException:
+            print("[qssh] Authentication failed. Check your key or passphrase.")
+            return 1
+        except paramiko.SSHException as e:
+            print(f"[qssh] SSH error: {e}")
+            return 1
+        except FileNotFoundError:
+            print(f"[qssh] Key file not found: {key_path}")
+            return 1
+        except Exception as e:
+            print(f"[qssh] Connection error: {e}")
+            return 1
     
     def _connect_with_paramiko(self, session: Session) -> int:
         """Connect using paramiko for automatic password authentication.

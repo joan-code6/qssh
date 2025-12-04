@@ -20,6 +20,7 @@ class Session:
     auth_type: str = "password"  # "password" or "key"
     password: Optional[str] = None  # base64 encoded
     key_file: Optional[str] = None
+    key_passphrase: Optional[str] = None  # base64 encoded
     
     def to_dict(self) -> dict:
         """Convert session to dictionary for storage."""
@@ -39,6 +40,15 @@ class Session:
                 return base64.b64decode(self.password.encode()).decode()
             except Exception:
                 return self.password
+        return None
+    
+    def get_key_passphrase(self) -> Optional[str]:
+        """Decode and return the key passphrase."""
+        if self.key_passphrase:
+            try:
+                return base64.b64decode(self.key_passphrase.encode()).decode()
+            except Exception:
+                return self.key_passphrase
         return None
     
     @staticmethod
