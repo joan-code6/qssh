@@ -15,7 +15,7 @@ pip install qssh
 ### 1. Add a new session
 
 ```bash
-qssh add outcraft
+qssh add myserver
 ```
 
 You'll be prompted for:
@@ -27,7 +27,7 @@ You'll be prompted for:
 ### 2. Connect to your VM
 
 ```bash
-qssh outcraft
+qssh myserver
 ```
 
 That's it! You're connected.
@@ -47,8 +47,8 @@ That's it! You're connected.
 ## Examples
 
 ```bash
-# Add a session for your OutCraft VM
-qssh add outcraft
+# Add a session for your myserver VM
+qssh add myserver
 # Host: 192.168.1.100
 # Username: admin
 # Port [22]: 22
@@ -56,7 +56,7 @@ qssh add outcraft
 # Password: ********
 
 # Now just connect with:
-qssh outcraft
+qssh myserver
 
 # List all your sessions
 qssh list
@@ -65,7 +65,7 @@ qssh list
 qssh remove old-server
 
 # Show details of a session
-qssh show outcraft
+qssh show myserver
 ```
 
 ## Using SSH Keys
