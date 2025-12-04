@@ -1,7 +1,7 @@
 """qssh - Quick SSH session manager."""
 
-__version__ = "0.2.1"
-__author__ = "benne"
+__version__ = "0.2.2"
+__author__ = "bennet"
 
 from .session import SessionManager
 from .connector import SSHConnector
