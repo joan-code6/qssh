@@ -17,36 +17,54 @@ manager = SessionManager()
 connector = SSHConnector()
 
 
-@click.group(invoke_without_command=True)
-@click.argument("session_name", required=False)
+class QSSHGroup(click.Group):
+    """Custom group that treats unknown commands as session names."""
+    
+    def parse_args(self, ctx, args):
+        # If we have args and the first arg is NOT a known command, 
+        # treat it as a session name
+        if args and args[0] not in self.commands:
+            # Check if it looks like a flag
+            if not args[0].startswith('-'):
+                ctx.session_to_connect = args[0]
+                args = args[1:]  # Remove the session name from args
+        return super().parse_args(ctx, args)
+    
+    def invoke(self, ctx):
+        # If we stored a session name, connect to it
+        session_name = getattr(ctx, 'session_to_connect', None)
+        if session_name:
+            _connect(session_name)
+            return
+        
+        return super().invoke(ctx)
+
+
+@click.group(cls=QSSHGroup, invoke_without_command=True)
 @click.option("--version", "-v", is_flag=True, help="Show version")
 @click.pass_context
-def main(ctx, session_name: str, version: bool):
+def main(ctx, version: bool):
     """qssh - Quick SSH session manager.
     
+    \b
     Connect to a saved session:
-    
         qssh <session-name>
     
-    Or use subcommands to manage sessions:
-    
+    \b
+    Manage sessions:
         qssh add <name>      Add a new session
-        
         qssh list            List all sessions
-        
         qssh remove <name>   Remove a session
+        qssh edit <name>     Edit a session
+        qssh show <name>     Show session details
     """
     if version:
         console.print(f"[bold blue]qssh[/] version [green]{__version__}[/]")
-        return
+        ctx.exit(0)
     
-    if ctx.invoked_subcommand is None:
-        if session_name:
-            # Try to connect to the session
-            _connect(session_name)
-        else:
-            # Show help
-            click.echo(ctx.get_help())
+    # Show help if no subcommand and no session
+    if ctx.invoked_subcommand is None and not getattr(ctx, 'session_to_connect', None):
+        click.echo(ctx.get_help())
 
 
 def _connect(name: str) -> None:
@@ -135,7 +153,7 @@ def add_session(name: str):
     console.print(f"[dim]Connect with: qssh {name}[/]")
 
 
-@main.command("list")
+@main.command("list", short_help="List all saved sessions")
 def list_sessions():
     """List all saved sessions."""
     sessions = manager.list_all()

@@ -2,9 +2,12 @@
 
 import os
 import sys
+import select
 import subprocess
 import platform
 from typing import Optional
+
+import paramiko
 
 from .session import Session
 
@@ -28,7 +31,7 @@ class SSHConnector:
         if session.auth_type == "key":
             return self._connect_with_key(session)
         else:
-            return self._connect_with_password(session)
+            return self._connect_with_paramiko(session)
     
     def _connect_with_key(self, session: Session) -> int:
         """Connect using SSH key authentication.
@@ -54,10 +57,8 @@ class SSHConnector:
         
         return self._run_ssh(cmd)
     
-    def _connect_with_password(self, session: Session) -> int:
-        """Connect using password authentication.
-        
-        Uses sshpass if available, otherwise prompts for password.
+    def _connect_with_paramiko(self, session: Session) -> int:
+        """Connect using paramiko for automatic password authentication.
         
         Args:
             session: Session configuration
@@ -67,57 +68,165 @@ class SSHConnector:
         """
         password = session.get_password()
         
-        # Check if sshpass is available for automatic password entry
-        if password and self._has_sshpass():
-            return self._connect_with_sshpass(session, password)
-        
-        # Fall back to regular SSH (will prompt for password if needed)
-        cmd = [
-            "ssh",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-p", str(session.port),
-            f"{session.username}@{session.host}",
-        ]
-        
-        if password:
-            # If we have a password but no sshpass, inform the user
-            print(f"[qssh] Password stored. Copy it or install 'sshpass' for auto-login.")
-            print(f"[qssh] Password: {password}")
-            print()
-        
-        return self._run_ssh(cmd)
+        try:
+            # Create SSH client
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Connect with password
+            client.connect(
+                hostname=session.host,
+                port=session.port,
+                username=session.username,
+                password=password,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            
+            # Start interactive shell
+            self._interactive_shell(client)
+            
+            client.close()
+            return 0
+            
+        except paramiko.AuthenticationException:
+            print("[qssh] Authentication failed. Check your password.")
+            return 1
+        except paramiko.SSHException as e:
+            print(f"[qssh] SSH error: {e}")
+            return 1
+        except Exception as e:
+            print(f"[qssh] Connection error: {e}")
+            return 1
     
-    def _connect_with_sshpass(self, session: Session, password: str) -> int:
-        """Connect using sshpass for automatic password entry.
+    def _interactive_shell(self, client: paramiko.SSHClient) -> None:
+        """Start an interactive shell session.
         
         Args:
-            session: Session configuration
-            password: Decoded password
-            
-        Returns:
-            Exit code
+            client: Connected SSH client
         """
-        cmd = [
-            "sshpass", "-p", password,
-            "ssh",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-p", str(session.port),
-            f"{session.username}@{session.host}",
-        ]
-        
-        return self._run_ssh(cmd)
-    
-    def _has_sshpass(self) -> bool:
-        """Check if sshpass is available on the system."""
+        # Get terminal size
         try:
-            subprocess.run(
-                ["sshpass", "-V"],
-                capture_output=True,
-                check=False
-            )
-            return True
-        except FileNotFoundError:
-            return False
+            import shutil
+            term_size = shutil.get_terminal_size()
+            width, height = term_size.columns, term_size.lines
+        except Exception:
+            width, height = 80, 24
+        
+        # Request a pseudo-terminal
+        channel = client.invoke_shell(
+            term="xterm-256color",
+            width=width,
+            height=height,
+        )
+        
+        # Make channel non-blocking
+        channel.setblocking(0)
+        
+        if self.system == "windows":
+            self._windows_interactive_shell(channel)
+        else:
+            self._unix_interactive_shell(channel)
+    
+    def _windows_interactive_shell(self, channel) -> None:
+        """Interactive shell for Windows using threads.
+        
+        Args:
+            channel: SSH channel
+        """
+        import threading
+        import msvcrt
+        
+        running = True
+        
+        def read_output():
+            """Read from channel and print to stdout."""
+            while running:
+                try:
+                    if channel.recv_ready():
+                        data = channel.recv(4096)
+                        if data:
+                            sys.stdout.write(data.decode("utf-8", errors="replace"))
+                            sys.stdout.flush()
+                        else:
+                            break
+                except Exception:
+                    break
+        
+        # Start output reader thread
+        output_thread = threading.Thread(target=read_output, daemon=True)
+        output_thread.start()
+        
+        try:
+            while running and not channel.closed:
+                # Check for keyboard input
+                if msvcrt.kbhit():
+                    char = msvcrt.getwch()
+                    if char == '\r':
+                        channel.send('\n')
+                    elif char == '\x03':  # Ctrl+C
+                        channel.send('\x03')
+                    elif char == '\x00' or char == '\xe0':  # Special keys
+                        # Read the second byte for arrow keys etc.
+                        char2 = msvcrt.getwch()
+                        # Map arrow keys to ANSI escape sequences
+                        key_map = {
+                            'H': '\x1b[A',  # Up
+                            'P': '\x1b[B',  # Down
+                            'M': '\x1b[C',  # Right
+                            'K': '\x1b[D',  # Left
+                        }
+                        if char2 in key_map:
+                            channel.send(key_map[char2])
+                    else:
+                        channel.send(char)
+                
+                # Small delay to prevent CPU spinning
+                if not channel.recv_ready():
+                    import time
+                    time.sleep(0.01)
+                    
+        except KeyboardInterrupt:
+            pass
+        finally:
+            running = False
+    
+    def _unix_interactive_shell(self, channel) -> None:
+        """Interactive shell for Unix systems using select.
+        
+        Args:
+            channel: SSH channel
+        """
+        import tty
+        import termios
+        
+        oldtty = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+            channel.settimeout(0.0)
+            
+            while True:
+                r, w, e = select.select([channel, sys.stdin], [], [])
+                
+                if channel in r:
+                    try:
+                        data = channel.recv(4096)
+                        if len(data) == 0:
+                            break
+                        sys.stdout.write(data.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+                    except Exception:
+                        break
+                
+                if sys.stdin in r:
+                    data = sys.stdin.read(1)
+                    if len(data) == 0:
+                        break
+                    channel.send(data)
+                    
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, oldtty)
     
     def _run_ssh(self, cmd: list) -> int:
         """Run SSH command and return exit code.
