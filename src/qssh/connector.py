@@ -173,13 +173,35 @@ class SSHConnector:
             channel: SSH channel
         """
         import threading
-        import msvcrt
+        import ctypes
         import time
+        from ctypes import wintypes
         
-        # Ignore SIGINT (Ctrl+C) at the Python level - we'll handle it manually
+        # Windows Console API constants
+        STD_INPUT_HANDLE = -10
+        ENABLE_PROCESSED_INPUT = 0x0001
+        ENABLE_LINE_INPUT = 0x0002
+        ENABLE_ECHO_INPUT = 0x0004
+        ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+        
+        kernel32 = ctypes.windll.kernel32
+        
+        # Get console handle
+        stdin_handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        
+        # Save original console mode
+        original_mode = wintypes.DWORD()
+        kernel32.GetConsoleMode(stdin_handle, ctypes.byref(original_mode))
+        
+        # Set console to raw mode (disable processed input to capture Ctrl+C)
+        new_mode = original_mode.value & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)
+        new_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT
+        kernel32.SetConsoleMode(stdin_handle, new_mode)
+        
+        # Ignore SIGINT at Python level as backup
         original_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         
-        running = [True]  # Use list to allow modification in nested function
+        running = [True]
         
         def read_output():
             """Read from channel and print to stdout."""
@@ -191,11 +213,9 @@ class SSHConnector:
                             sys.stdout.write(data.decode("utf-8", errors="replace"))
                             sys.stdout.flush()
                         else:
-                            # Empty data means connection closed
                             running[0] = False
                             break
                     
-                    # Check if channel is closed
                     if channel.closed or channel.exit_status_ready():
                         running[0] = False
                         break
@@ -205,53 +225,88 @@ class SSHConnector:
                     running[0] = False
                     break
         
-        # Start output reader thread
+        # Structure for reading console input
+        class KEY_EVENT_RECORD(ctypes.Structure):
+            _fields_ = [
+                ("bKeyDown", wintypes.BOOL),
+                ("wRepeatCount", wintypes.WORD),
+                ("wVirtualKeyCode", wintypes.WORD),
+                ("wVirtualScanCode", wintypes.WORD),
+                ("uChar", ctypes.c_wchar),
+                ("dwControlKeyState", wintypes.DWORD),
+            ]
+        
+        class INPUT_RECORD_UNION(ctypes.Union):
+            _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
+        
+        class INPUT_RECORD(ctypes.Structure):
+            _fields_ = [
+                ("EventType", wintypes.WORD),
+                ("Event", INPUT_RECORD_UNION),
+            ]
+        
+        KEY_EVENT = 0x0001
+        
+        # Virtual key codes for special keys
+        VK_MAP = {
+            0x26: '\x1b[A',  # Up
+            0x28: '\x1b[B',  # Down
+            0x27: '\x1b[C',  # Right
+            0x25: '\x1b[D',  # Left
+            0x24: '\x1b[H',  # Home
+            0x23: '\x1b[F',  # End
+            0x2D: '\x1b[2~', # Insert
+            0x2E: '\x1b[3~', # Delete
+            0x21: '\x1b[5~', # Page Up
+            0x22: '\x1b[6~', # Page Down
+        }
+        
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
         try:
+            input_record = INPUT_RECORD()
+            events_read = wintypes.DWORD()
+            
             while running[0] and not channel.closed:
-                # Check for keyboard input (non-blocking)
-                if msvcrt.kbhit():
-                    # Use getch for raw byte input (better for control chars)
-                    char = msvcrt.getwch()
+                # Check if input is available
+                events_available = wintypes.DWORD()
+                kernel32.GetNumberOfConsoleInputEvents(stdin_handle, ctypes.byref(events_available))
+                
+                if events_available.value > 0:
+                    # Read input event
+                    kernel32.ReadConsoleInputW(
+                        stdin_handle,
+                        ctypes.byref(input_record),
+                        1,
+                        ctypes.byref(events_read)
+                    )
                     
-                    if char == '\r':
-                        # Enter key - send carriage return
-                        channel.send('\r')
-                    elif char == '\x00' or char == '\xe0':
-                        # Special keys (arrows, function keys, etc.)
-                        char2 = msvcrt.getwch()
-                        # Map arrow keys to ANSI escape sequences
-                        key_map = {
-                            'H': '\x1b[A',  # Up
-                            'P': '\x1b[B',  # Down
-                            'M': '\x1b[C',  # Right
-                            'K': '\x1b[D',  # Left
-                            'G': '\x1b[H',  # Home
-                            'O': '\x1b[F',  # End
-                            'R': '\x1b[2~', # Insert
-                            'S': '\x1b[3~', # Delete
-                            'I': '\x1b[5~', # Page Up
-                            'Q': '\x1b[6~', # Page Down
-                        }
-                        if char2 in key_map:
-                            channel.send(key_map[char2])
-                    elif char == '\x08':
-                        # Backspace
-                        channel.send('\x7f')
-                    else:
-                        # Send character as-is (includes Ctrl+C as \x03, Ctrl+D as \x04, etc.)
-                        channel.send(char)
+                    if input_record.EventType == KEY_EVENT:
+                        key_event = input_record.Event.KeyEvent
+                        
+                        if key_event.bKeyDown:
+                            vk = key_event.wVirtualKeyCode
+                            char = key_event.uChar
+                            
+                            # Check for special keys
+                            if vk in VK_MAP:
+                                channel.send(VK_MAP[vk])
+                            elif char == '\r':
+                                channel.send('\r')
+                            elif char == '\x08':  # Backspace
+                                channel.send('\x7f')
+                            elif char:
+                                # Send character including control chars (Ctrl+C = \x03)
+                                channel.send(char)
                 else:
-                    # Small delay to prevent CPU spinning
                     time.sleep(0.01)
                     
         finally:
             running[0] = False
-            # Wait for output thread to finish
             output_thread.join(timeout=1.0)
-            # Restore original signal handler
+            # Restore original console mode
+            kernel32.SetConsoleMode(stdin_handle, original_mode.value)
             signal.signal(signal.SIGINT, original_sigint)
     
     def _unix_interactive_shell(self, channel) -> None:
