@@ -2,6 +2,7 @@
 
 import os
 import sys
+import signal
 import select
 import subprocess
 import platform
@@ -173,12 +174,16 @@ class SSHConnector:
         """
         import threading
         import msvcrt
+        import time
         
-        running = True
+        # Ignore SIGINT (Ctrl+C) at the Python level - we'll handle it manually
+        original_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        
+        running = [True]  # Use list to allow modification in nested function
         
         def read_output():
             """Read from channel and print to stdout."""
-            while running:
+            while running[0]:
                 try:
                     if channel.recv_ready():
                         data = channel.recv(4096)
@@ -186,8 +191,18 @@ class SSHConnector:
                             sys.stdout.write(data.decode("utf-8", errors="replace"))
                             sys.stdout.flush()
                         else:
+                            # Empty data means connection closed
+                            running[0] = False
                             break
+                    
+                    # Check if channel is closed
+                    if channel.closed or channel.exit_status_ready():
+                        running[0] = False
+                        break
+                        
+                    time.sleep(0.01)
                 except Exception:
+                    running[0] = False
                     break
         
         # Start output reader thread
@@ -195,16 +210,17 @@ class SSHConnector:
         output_thread.start()
         
         try:
-            while running and not channel.closed:
-                # Check for keyboard input
+            while running[0] and not channel.closed:
+                # Check for keyboard input (non-blocking)
                 if msvcrt.kbhit():
+                    # Use getch for raw byte input (better for control chars)
                     char = msvcrt.getwch()
+                    
                     if char == '\r':
-                        channel.send('\n')
-                    elif char == '\x03':  # Ctrl+C
-                        channel.send('\x03')
-                    elif char == '\x00' or char == '\xe0':  # Special keys
-                        # Read the second byte for arrow keys etc.
+                        # Enter key - send carriage return
+                        channel.send('\r')
+                    elif char == '\x00' or char == '\xe0':
+                        # Special keys (arrows, function keys, etc.)
                         char2 = msvcrt.getwch()
                         # Map arrow keys to ANSI escape sequences
                         key_map = {
@@ -212,21 +228,31 @@ class SSHConnector:
                             'P': '\x1b[B',  # Down
                             'M': '\x1b[C',  # Right
                             'K': '\x1b[D',  # Left
+                            'G': '\x1b[H',  # Home
+                            'O': '\x1b[F',  # End
+                            'R': '\x1b[2~', # Insert
+                            'S': '\x1b[3~', # Delete
+                            'I': '\x1b[5~', # Page Up
+                            'Q': '\x1b[6~', # Page Down
                         }
                         if char2 in key_map:
                             channel.send(key_map[char2])
+                    elif char == '\x08':
+                        # Backspace
+                        channel.send('\x7f')
                     else:
+                        # Send character as-is (includes Ctrl+C as \x03, Ctrl+D as \x04, etc.)
                         channel.send(char)
-                
-                # Small delay to prevent CPU spinning
-                if not channel.recv_ready():
-                    import time
+                else:
+                    # Small delay to prevent CPU spinning
                     time.sleep(0.01)
                     
-        except KeyboardInterrupt:
-            pass
         finally:
-            running = False
+            running[0] = False
+            # Wait for output thread to finish
+            output_thread.join(timeout=1.0)
+            # Restore original signal handler
+            signal.signal(signal.SIGINT, original_sigint)
     
     def _unix_interactive_shell(self, channel) -> None:
         """Interactive shell for Unix systems using select.
