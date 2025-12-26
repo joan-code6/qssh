@@ -68,3 +68,4 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+dontlookhere.txt

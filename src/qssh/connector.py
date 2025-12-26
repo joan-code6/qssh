@@ -55,8 +55,14 @@ class SSHConnector:
             pkey = None
             if key_path and os.path.exists(key_path):
                 try:
-                    # Try different key types
-                    for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey]:
+                    # Try different key types, but only include classes actually present
+                    key_classes = []
+                    for name in ("RSAKey", "Ed25519Key", "ECDSAKey", "DSSKey"):
+                        cls = getattr(paramiko, name, None)
+                        if cls is not None:
+                            key_classes.append(cls)
+
+                    for key_class in key_classes:
                         try:
                             pkey = key_class.from_private_key_file(key_path, password=passphrase)
                             break
@@ -65,16 +71,33 @@ class SSHConnector:
                 except Exception as e:
                     print(f"[qssh] Error loading key: {e}")
                     return 1
+
+            # If a key file was specified but we couldn't load a pkey, fail early
+            if key_path and os.path.exists(key_path) and pkey is None:
+                print(f"[qssh] Error loading key: unsupported key type or wrong passphrase for {key_path}")
+                return 1
             
             # Connect with key
-            client.connect(
+            # If no explicit pkey was loaded, allow Paramiko to look for keys and agent
+            connect_kwargs = dict(
                 hostname=session.host,
                 port=session.port,
                 username=session.username,
                 pkey=pkey,
-                look_for_keys=False,
-                allow_agent=False,
             )
+
+            if pkey is None:
+                connect_kwargs.update({
+                    "look_for_keys": True,
+                    "allow_agent": True,
+                })
+            else:
+                connect_kwargs.update({
+                    "look_for_keys": False,
+                    "allow_agent": False,
+                })
+
+            client.connect(**connect_kwargs)
             
             # Start interactive shell
             self._interactive_shell(client)
