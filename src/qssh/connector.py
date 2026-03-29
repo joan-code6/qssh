@@ -29,10 +29,39 @@ class SSHConnector:
         Returns:
             Exit code from SSH process
         """
+        # On Windows, native OpenSSH provides the most reliable TUI key handling.
+        # Fall back to Paramiko only if ssh.exe is unavailable.
+        if self.system == "windows":
+            native_exit = self._connect_with_system_ssh(session)
+            if native_exit != 127:
+                return native_exit
+
         if session.auth_type == "key":
             return self._connect_with_key_paramiko(session)
         else:
             return self._connect_with_paramiko(session)
+
+    def _connect_with_system_ssh(self, session: Session) -> int:
+        """Connect using the system ssh client.
+
+        Returns 127 when ssh is not available so callers can fall back.
+        """
+        cmd = [
+            "ssh",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-p", str(session.port),
+        ]
+
+        if session.auth_type == "key" and session.key_file:
+            cmd.extend(["-i", os.path.expanduser(session.key_file)])
+
+        cmd.append(f"{session.username}@{session.host}")
+
+        try:
+            return self._run_ssh(cmd)
+        except FileNotFoundError:
+            return 127
     
     def _connect_with_key_paramiko(self, session: Session) -> int:
         """Connect using SSH key authentication via paramiko.
@@ -197,8 +226,8 @@ class SSHConnector:
         """
         import threading
         import ctypes
+        import msvcrt
         import time
-        import os
         from ctypes import wintypes
         
         # Windows Console API constants
@@ -217,9 +246,10 @@ class SSHConnector:
         original_mode = wintypes.DWORD()
         kernel32.GetConsoleMode(stdin_handle, ctypes.byref(original_mode))
         
-        # Set console to raw mode (disable processed input to capture Ctrl+C)
+        # Set console to raw mode (disable line/echo for immediate key handling)
         new_mode = original_mode.value & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)
-        new_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT
+        # Keep VT input disabled here; msvcrt returns stable key codes for arrows.
+        new_mode &= ~ENABLE_VIRTUAL_TERMINAL_INPUT
         kernel32.SetConsoleMode(stdin_handle, new_mode)
         
         # Ignore SIGINT at Python level as backup
@@ -249,20 +279,60 @@ class SSHConnector:
                     running[0] = False
                     break
         
+        # msvcrt special key map (after prefix \x00 or \xe0)
+        special_map = {
+            'H': b'\x1b[A',  # Up
+            'P': b'\x1b[B',  # Down
+            'M': b'\x1b[C',  # Right
+            'K': b'\x1b[D',  # Left
+            'G': b'\x1b[H',  # Home
+            'O': b'\x1b[F',  # End
+            'R': b'\x1b[2~', # Insert
+            'S': b'\x1b[3~', # Delete
+            'I': b'\x1b[5~', # Page Up
+            'Q': b'\x1b[6~', # Page Down
+            ';': b'\x1bOP',  # F1
+            '<': b'\x1bOQ',  # F2
+            '=': b'\x1bOR',  # F3
+            '>': b'\x1bOS',  # F4
+            '?': b'\x1b[15~',# F5
+            '@': b'\x1b[17~',# F6
+            'A': b'\x1b[18~',# F7
+            'B': b'\x1b[19~',# F8
+            'C': b'\x1b[20~',# F9
+            'D': b'\x1b[21~',# F10
+            '5': b'\x1b[23~',# F11
+            '6': b'\x1b[24~',# F12
+        }
+        
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
         try:
-            # Read raw VT input bytes from the console and forward as-is.
-            # This preserves full terminal behavior for TUIs (cursor mode,
-            # modifier combinations, function keys, etc.) instead of relying
-            # on a static key translation table.
-            input_fd = sys.stdin.fileno()
             while running[0] and not channel.closed:
-                data = os.read(input_fd, 1024)
-                if not data:
-                    break
-                channel.sendall(data)
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+
+                    # Extended key prefix: next char identifies the key.
+                    if ch in ('\x00', '\xe0'):
+                        key = msvcrt.getwch()
+                        seq = special_map.get(key)
+                        if seq:
+                            channel.sendall(seq)
+                        continue
+
+                    if ch == '\r':
+                        channel.sendall(b'\r')
+                    elif ch == '\x08':
+                        channel.sendall(b'\x7f')
+                    elif ch == '\x03':
+                        channel.sendall(b'\x03')
+                    elif ch == '\x1b':
+                        channel.sendall(b'\x1b')
+                    else:
+                        channel.sendall(ch.encode('utf-8', errors='replace'))
+                else:
+                    time.sleep(0.01)
                     
         finally:
             running[0] = False
@@ -326,7 +396,7 @@ class SSHConnector:
             print("[qssh] Please ensure OpenSSH is installed and in your PATH.")
             if self.system == "windows":
                 print("[qssh] On Windows, you can enable it in Settings > Apps > Optional Features")
-            return 1
+            return 127
         except KeyboardInterrupt:
             print("\n[qssh] Connection interrupted.")
             return 130
