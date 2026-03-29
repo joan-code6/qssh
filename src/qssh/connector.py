@@ -198,6 +198,7 @@ class SSHConnector:
         import threading
         import ctypes
         import time
+        import os
         from ctypes import wintypes
         
         # Windows Console API constants
@@ -248,82 +249,20 @@ class SSHConnector:
                     running[0] = False
                     break
         
-        # Structure for reading console input
-        class KEY_EVENT_RECORD(ctypes.Structure):
-            _fields_ = [
-                ("bKeyDown", wintypes.BOOL),
-                ("wRepeatCount", wintypes.WORD),
-                ("wVirtualKeyCode", wintypes.WORD),
-                ("wVirtualScanCode", wintypes.WORD),
-                ("uChar", ctypes.c_wchar),
-                ("dwControlKeyState", wintypes.DWORD),
-            ]
-        
-        class INPUT_RECORD_UNION(ctypes.Union):
-            _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
-        
-        class INPUT_RECORD(ctypes.Structure):
-            _fields_ = [
-                ("EventType", wintypes.WORD),
-                ("Event", INPUT_RECORD_UNION),
-            ]
-        
-        KEY_EVENT = 0x0001
-        
-        # Virtual key codes for special keys
-        VK_MAP = {
-            0x26: '\x1b[A',  # Up
-            0x28: '\x1b[B',  # Down
-            0x27: '\x1b[C',  # Right
-            0x25: '\x1b[D',  # Left
-            0x24: '\x1b[H',  # Home
-            0x23: '\x1b[F',  # End
-            0x2D: '\x1b[2~', # Insert
-            0x2E: '\x1b[3~', # Delete
-            0x21: '\x1b[5~', # Page Up
-            0x22: '\x1b[6~', # Page Down
-        }
-        
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
         try:
-            input_record = INPUT_RECORD()
-            events_read = wintypes.DWORD()
-            
+            # Read raw VT input bytes from the console and forward as-is.
+            # This preserves full terminal behavior for TUIs (cursor mode,
+            # modifier combinations, function keys, etc.) instead of relying
+            # on a static key translation table.
+            input_fd = sys.stdin.fileno()
             while running[0] and not channel.closed:
-                # Check if input is available
-                events_available = wintypes.DWORD()
-                kernel32.GetNumberOfConsoleInputEvents(stdin_handle, ctypes.byref(events_available))
-                
-                if events_available.value > 0:
-                    # Read input event
-                    kernel32.ReadConsoleInputW(
-                        stdin_handle,
-                        ctypes.byref(input_record),
-                        1,
-                        ctypes.byref(events_read)
-                    )
-                    
-                    if input_record.EventType == KEY_EVENT:
-                        key_event = input_record.Event.KeyEvent
-                        
-                        if key_event.bKeyDown:
-                            vk = key_event.wVirtualKeyCode
-                            char = key_event.uChar
-                            
-                            # Check for special keys
-                            if vk in VK_MAP:
-                                channel.send(VK_MAP[vk])
-                            elif char == '\r':
-                                channel.send('\r')
-                            elif char == '\x08':  # Backspace
-                                channel.send('\x7f')
-                            elif char:
-                                # Send character including control chars (Ctrl+C = \x03)
-                                channel.send(char)
-                else:
-                    time.sleep(0.01)
+                data = os.read(input_fd, 1024)
+                if not data:
+                    break
+                channel.sendall(data)
                     
         finally:
             running[0] = False
