@@ -29,9 +29,10 @@ class SSHConnector:
         Returns:
             Exit code from SSH process
         """
-        # On Windows, native OpenSSH provides the most reliable TUI key handling.
-        # Fall back to Paramiko only if ssh.exe is unavailable.
-        if self.system == "windows":
+        # On Windows, native OpenSSH provides the most reliable TUI key handling
+        # for key-based sessions. Password sessions must use Paramiko so qssh can
+        # supply the stored password non-interactively.
+        if self.system == "windows" and session.auth_type == "key":
             native_exit = self._connect_with_system_ssh(session)
             if native_exit != 127:
                 return native_exit
