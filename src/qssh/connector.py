@@ -6,6 +6,7 @@ import signal
 import select
 import subprocess
 import platform
+import socket
 from typing import Optional
 
 import paramiko
@@ -15,6 +16,8 @@ from .session import Session
 
 class SSHConnector:
     """Handles SSH connections to remote hosts."""
+
+    PARAMIKO_FALLBACK_EXIT = 125
     
     def __init__(self):
         """Initialize SSH connector."""
@@ -32,10 +35,23 @@ class SSHConnector:
         # On Windows, native OpenSSH provides the most reliable TUI key handling
         # for key-based sessions. Password sessions must use Paramiko so qssh can
         # supply the stored password non-interactively.
-        if self.system == "windows" and session.auth_type == "key":
-            native_exit = self._connect_with_system_ssh(session)
-            if native_exit != 127:
-                return native_exit
+        if self.system == "windows":
+            if session.auth_type == "key":
+                native_exit = self._connect_with_system_ssh(session)
+                if native_exit != 127:
+                    return native_exit
+            else:
+                # Prefer Paramiko for stored passwords, but fall back to native ssh
+                # on connection-level failures where OpenSSH may still work
+                # (e.g. user SSH config/proxy handling on Windows).
+                paramiko_exit = self._connect_with_paramiko(session)
+                if paramiko_exit == self.PARAMIKO_FALLBACK_EXIT:
+                    console_msg = "[qssh] Paramiko connection failed, falling back to system ssh..."
+                    print(console_msg)
+                    native_exit = self._connect_with_system_ssh(session)
+                    if native_exit != 127:
+                        return native_exit
+                return paramiko_exit
 
         if session.auth_type == "key":
             return self._connect_with_key_paramiko(session)
@@ -182,6 +198,15 @@ class SSHConnector:
             
         except paramiko.AuthenticationException:
             print("[qssh] Authentication failed. Check your password.")
+            return 1
+        except (socket.timeout, TimeoutError):
+            return self.PARAMIKO_FALLBACK_EXIT
+        except OSError as e:
+            # Typical Windows connect timeout/refused failures should fall back to
+            # the native ssh client, which may use extra user SSH config.
+            if getattr(e, "winerror", None) in {10060, 10061, 10065}:
+                return self.PARAMIKO_FALLBACK_EXIT
+            print(f"[qssh] Connection error: {e}")
             return 1
         except paramiko.SSHException as e:
             print(f"[qssh] SSH error: {e}")
